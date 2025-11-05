@@ -53,6 +53,6 @@ Gira el sensor lentamente en 360° antes de que se muestre “✅ Calibración c
 
 ## 🧩 Autoría
 
-Proyecto desarrollado por **Lili & Armand**  
+Proyecto desarrollado por **Armand, Guille y Herbert**  
 Curso: *Programación de Artefactos – UCA (El Salvador)*  
 Año: 2025  
