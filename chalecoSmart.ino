@@ -8,6 +8,8 @@
 // ----------------------------
 #define UV_PIN A0
 #define BUZZER_PIN D6  // mismo buzzer para dirección y caída
+#define TRIG_PIN D8
+#define ECHO_PIN D7
 
 #define N 5  // Número de lecturas para promedio
 int readings[N];
@@ -24,6 +26,7 @@ Adafruit_MPU6050 mpu;
 // ----------------------------
 float offsetX = 0, offsetY = 0;
 const float declinacion = 1.9; // declinación magnética de El Salvador
+const int DISTANCIA_ALERTA = 120; // cm
 
 // ----------------------------
 // Funciones auxiliares
@@ -68,6 +71,8 @@ void setup() {
 
   pinMode(BUZZER_PIN, OUTPUT);
   digitalWrite(BUZZER_PIN, LOW);
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
 
   // --- Inicialización brújula ---
   compass.init();
@@ -159,6 +164,30 @@ void loop() {
     digitalWrite(BUZZER_PIN, HIGH);
     delay(2000);
     digitalWrite(BUZZER_PIN, LOW);
+  }
+
+  // --- Sensor ultrasónico HC-SR04 ---
+  long duracion;
+  float distancia;
+
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  duracion = pulseIn(ECHO_PIN, HIGH);
+  distancia = duracion * 0.0343 / 2;
+
+  Serial.print("Distancia: ");
+  Serial.print(distancia);
+  Serial.println(" cm");
+
+  if (distancia <= DISTANCIA_ALERTA && distancia > 0) {
+    Serial.println("🚧 Obstáculo detectado a menos de 1.20 m");
+    tone(BUZZER_PIN, 1000);  // tono de advertencia
+  } else {
+    noTone(BUZZER_PIN);
   }
 
   delay(1000);
