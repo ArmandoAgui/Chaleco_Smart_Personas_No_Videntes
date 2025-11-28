@@ -4,32 +4,102 @@
 #include <Adafruit_Sensor.h>
 
 // ----------------------------
-// Pines y configuraciones
+// Pines
 // ----------------------------
 #define UV_PIN A0
-#define BUZZER_PIN D6  // mismo buzzer para dirección y caída
+#define BUZZER_PIN D6
 #define TRIG_PIN D8
 #define ECHO_PIN D7
 
-#define N 5  // Número de lecturas para promedio
+#define N 5
 int readings[N];
 int indexReadings = 0;
 
-// ----------------------------
-// Objetos de sensores
 // ----------------------------
 QMC5883LCompass compass;
 Adafruit_MPU6050 mpu;
 
 // ----------------------------
-// Variables de calibración
-// ----------------------------
 float offsetX = 0, offsetY = 0;
-const float declinacion = 1.9; // declinación magnética de El Salvador
-const int DISTANCIA_ALERTA = 120; // cm
+const float declinacion = 1.9;
+const int DISTANCIA_ALERTA = 120;
 
 // ----------------------------
-// Funciones auxiliares
+// Timers
+// ----------------------------
+unsigned long lastCompassBeep = 0;
+unsigned long compassInterval = 15000; 
+
+unsigned long uvStartHigh = 0;
+bool uvTimerRunning = false;
+unsigned long uvThresholdTime = 60000;
+
+bool fallAlertPlayed = false;
+
+// Intervalo de impresión
+unsigned long lastPrint = 0;
+unsigned long printInterval = 2000;  // 0.5 s
+
+// Variables para imprimir datos
+float uvIndex_global = 0;
+int heading_global = 0;
+String direction_global = "";
+float acceleration_global = 0;
+float distancia_global = 0;
+
+// ----------------------------
+// MELODÍAS
+// ----------------------------
+void melodyCompass(String dir) {
+  Serial.print("🔔 Melodía brújula → ");
+  Serial.println(dir);
+
+  if (dir == "Norte") {
+    digitalWrite(BUZZER_PIN, HIGH); delay(120);
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+  else if (dir == "Este") {
+    for (int i=0; i<2; i++){
+      digitalWrite(BUZZER_PIN, HIGH); delay(100);
+      digitalWrite(BUZZER_PIN, LOW);  delay(120);
+    }
+  }
+  else if (dir == "Sur") {
+    digitalWrite(BUZZER_PIN, HIGH); delay(350);
+    digitalWrite(BUZZER_PIN, LOW);
+  }
+  else if (dir == "Oeste") {
+    for (int i=0; i<3; i++){
+      digitalWrite(BUZZER_PIN, HIGH); delay(80);
+      digitalWrite(BUZZER_PIN, LOW);  delay(100);
+    }
+  }
+}
+
+void melodyUV() {
+  Serial.println("🌞🔔 Alerta UV > 8 durante 60s → Melodía UV");
+  for (int i=0; i<3; i++){
+    digitalWrite(BUZZER_PIN, HIGH); delay(80);
+    digitalWrite(BUZZER_PIN, LOW);  delay(80);
+  }
+}
+
+void melodyFall() {
+  Serial.println("🛑🪂 CAÍDA DETECTADA → Melodía caída");
+  for (int i=0; i<5; i++){
+    digitalWrite(BUZZER_PIN, HIGH); delay(150);
+    digitalWrite(BUZZER_PIN, LOW);  delay(100);
+  }
+}
+
+void melodyDistance() {
+  Serial.println("🚧🔔 Obstáculo a menos de 120 cm → Melodía obstáculo");
+  digitalWrite(BUZZER_PIN, HIGH); delay(200);
+  digitalWrite(BUZZER_PIN, LOW);  delay(150);
+}
+
+// ----------------------------
+// AUXILIARES
 // ----------------------------
 void addReading(int value) {
   readings[indexReadings] = value;
@@ -42,134 +112,109 @@ int getAverage() {
   return sum / N;
 }
 
-void beepDirection(String direction) {
-  if (direction == "Norte") {
-    tone(BUZZER_PIN, 1000, 100);
-  } else if (direction == "Noreste") {
-    tone(BUZZER_PIN, 1200, 150);
-  } else if (direction == "Este") {
-    tone(BUZZER_PIN, 1500, 200);
-  } else if (direction == "Sureste") {
-    tone(BUZZER_PIN, 1800, 250);
-  } else if (direction == "Sur") {
-    tone(BUZZER_PIN, 900, 300);
-  } else if (direction == "Suroeste") {
-    tone(BUZZER_PIN, 800, 350);
-  } else if (direction == "Oeste") {
-    tone(BUZZER_PIN, 700, 400);
-  } else if (direction == "Noroeste") {
-    tone(BUZZER_PIN, 600, 450);
-  }
-}
-
 // ----------------------------
 // SETUP
 // ----------------------------
 void setup() {
   Serial.begin(115200);
-  Wire.begin(D2, D1);  // SDA, SCL (ajustado a QMC y MPU)
+  Wire.begin(D1, D2);
 
   pinMode(BUZZER_PIN, OUTPUT);
-  digitalWrite(BUZZER_PIN, LOW);
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
-  // --- Inicialización brújula ---
+  Serial.println("🔧 Inicializando sensores...");
+
+  // Calibrar brújula
   compass.init();
-  Serial.println("Gira el sensor lentamente 360° para calibrar...");
-  float maxX = -10000, minX = 10000, maxY = -10000, minY = 10000;
-  unsigned long startTime = millis();
-  while (millis() - startTime < 5000) {
+  float maxX=-10000, minX=10000, maxY=-10000, minY=10000;
+  unsigned long t = millis();
+  while (millis()-t < 5000){
     compass.read();
     float x = compass.getX();
     float y = compass.getY();
-    if (x > maxX) maxX = x;
-    if (x < minX) minX = x;
-    if (y > maxY) maxY = y;
-    if (y < minY) minY = y;
+    if (x>maxX) maxX=x; if (x<minX) minX=x;
+    if (y>maxY) maxY=y; if (y<minY) minY=y;
     delay(50);
   }
-  offsetX = (maxX + minX) / 2.0;
-  offsetY = (maxY + minY) / 2.0;
-  Serial.println("✅ Calibración brújula completa!");
+  offsetX = (maxX+minX)/2.0;
+  offsetY = (maxY+minY)/2.0;
 
-  // --- Inicialización MPU6050 ---
-  if (!mpu.begin()) {
-    Serial.println("❌ No se detectó el MPU6050.");
-    while (1);
-  }
-  Serial.println("✅ MPU6050 listo.");
+  // Inicializar MPU
+  if (!mpu.begin()) while (1);
   mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
   mpu.setGyroRange(MPU6050_RANGE_500_DEG);
   mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
-  delay(100);
+
+  Serial.println("🚀 Sistema listo.");
 }
 
 // ----------------------------
-// LOOP PRINCIPAL
+// LOOP
 // ----------------------------
 void loop() {
-  // --- Sensor UV ---
+
+  unsigned long currentMillis = millis();
+
+  // ----------- UV SENSOR -----------
   int sensorValue = analogRead(UV_PIN);
   float voltage = sensorValue * (1.0 / 1023.0);
   float realVoltage = voltage * 3.3;
-  float uvIndex = realVoltage * 10.0;
-  Serial.print("UV ADC: "); Serial.print(sensorValue);
-  Serial.print("\tVoltaje: "); Serial.print(realVoltage, 2);
-  Serial.print(" V\tÍndice UV: "); Serial.println(uvIndex, 1);
+  uvIndex_global = realVoltage * 10.0;
 
-  // --- Brújula ---
+  if (uvIndex_global > 8) {
+    if (!uvTimerRunning) {
+      uvTimerRunning = true;
+      uvStartHigh = currentMillis;
+    }
+    if (currentMillis - uvStartHigh >= uvThresholdTime) {
+      melodyUV();
+    }
+  } else {
+    uvTimerRunning = false;
+  }
+
+  // ----------- BRÚJULA -----------
   compass.read();
   float x = compass.getX() - offsetX;
   float y = compass.getY() - offsetY;
+
   float heading = atan2(y, x) * 180.0 / PI;
   heading -= declinacion;
-  if (heading < 0) heading += 360.0;
-  if (heading >= 360.0) heading -= 360.0;
+  if (heading < 0) heading += 360;
+  if (heading >= 360) heading -= 360;
+
   addReading((int)heading);
-  int avgHeading = getAverage();
+  heading_global = getAverage();
 
-  String direction;
-  if ((avgHeading >= 315 && avgHeading <= 360) || (avgHeading >= 0 && avgHeading < 45))
-    direction = "Norte";
-  else if (avgHeading >= 45 && avgHeading < 135)
-    direction = "Este";
-  else if (avgHeading >= 135 && avgHeading < 225)
-    direction = "Sur";
-  else if (avgHeading >= 225 && avgHeading < 315)
-    direction = "Oeste";
+  if ((heading_global >= 315) || (heading_global < 45)) direction_global = "Norte";
+  else if (heading_global >= 45 && heading_global < 135) direction_global = "Este";
+  else if (heading_global >= 135 && heading_global < 225) direction_global = "Sur";
+  else direction_global = "Oeste";
 
-  Serial.print("Grados geográficos: ");
-  Serial.print(avgHeading);
-  Serial.print("°  Dirección: ");
-  Serial.println(direction);
-
-  beepDirection(direction);
-
-  // --- MPU6050 (detección de caída) ---
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
-  float Atotal = sqrt(
-    a.acceleration.x * a.acceleration.x +
-    a.acceleration.y * a.acceleration.y +
-    a.acceleration.z * a.acceleration.z
-  );
-
-  Serial.print("A_total: ");
-  Serial.print(Atotal);
-  Serial.println(" m/s²");
-
-  if (Atotal < 6.5) {
-    Serial.println("⚠️ ¡Caída detectada! Activando buzzer...");
-    digitalWrite(BUZZER_PIN, HIGH);
-    delay(2000);
-    digitalWrite(BUZZER_PIN, LOW);
+  if (currentMillis - lastCompassBeep >= compassInterval) {
+    melodyCompass(direction_global);
+    lastCompassBeep = currentMillis;
   }
 
-  // --- Sensor ultrasónico HC-SR04 ---
-  long duracion;
-  float distancia;
+  // ----------- CAÍDA -----------
+  sensors_event_t a, g, temp;
+  mpu.getEvent(&a, &g, &temp);
 
+  acceleration_global = sqrt(
+    a.acceleration.x*a.acceleration.x +
+    a.acceleration.y*a.acceleration.y +
+    a.acceleration.z*a.acceleration.z
+  );
+
+  if (acceleration_global < 6.5 && !fallAlertPlayed) {
+    melodyFall();
+    fallAlertPlayed = true;
+  }
+  if (acceleration_global > 9.0) fallAlertPlayed = false;
+
+  // ----------- ULTRASONIDO -----------
+  long duracion;
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
   digitalWrite(TRIG_PIN, HIGH);
@@ -177,18 +222,23 @@ void loop() {
   digitalWrite(TRIG_PIN, LOW);
 
   duracion = pulseIn(ECHO_PIN, HIGH);
-  distancia = duracion * 0.0343 / 2;
+  distancia_global = duracion * 0.0343 / 2;
 
-  Serial.print("Distancia: ");
-  Serial.print(distancia);
-  Serial.println(" cm");
-
-  if (distancia <= DISTANCIA_ALERTA && distancia > 0) {
-    Serial.println("🚧 Obstáculo detectado a menos de 1.20 m");
-    tone(BUZZER_PIN, 1000);  // tono de advertencia
-  } else {
-    noTone(BUZZER_PIN);
+  if (distancia_global > 0 && distancia_global <= DISTANCIA_ALERTA) {
+    melodyDistance();
   }
 
-  delay(1000);
+  // ----------- IMPRESIÓN CADA 500 ms -----------
+  if (currentMillis - lastPrint >= printInterval) {
+    lastPrint = currentMillis;
+
+    Serial.println("===== DATOS =====");
+    Serial.print("UV Index: "); Serial.println(uvIndex_global);
+    Serial.print("Brújula: "); Serial.print(heading_global);
+    Serial.print("° → "); Serial.println(direction_global);
+    Serial.print("Aceleración: "); Serial.println(acceleration_global);
+    Serial.print("Distancia: "); Serial.print(distancia_global); Serial.println(" cm");
+    Serial.println("=================\n");
+  }
 }
+
