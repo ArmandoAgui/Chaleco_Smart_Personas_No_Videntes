@@ -14386,6 +14386,7 @@ int indexReadings = 0;
 // ----------------------------
 QMC5883LCompass compass;
 Adafruit_MPU6050 mpu;
+bool mpuOk = false;  // ← bandera de estado
 
 // ----------------------------
 // Calibración brújula
@@ -14418,7 +14419,7 @@ Adafruit_MQTT_Publish feedStatus(&mqtt, AIO_USERNAME "/feeds/vest_status");
 
 // Timers
 unsigned long lastCompassBeep = 0;
-unsigned long compassInterval = 15000;
+unsigned long compassInterval = 3000;
 
 unsigned long uvStartHigh = 0;
 bool uvTimerRunning = false;
@@ -14435,10 +14436,10 @@ unsigned long sendInterval = 60000; // 1 minuto
 // ===============================================
 // 🔊 CONFIG AUDIO
 // ===============================================
-#define AUDIO_PIN D3
-const int sampleDelay = 10;  // más rápido → menos vibración y menos ruido
+#define AUDIO_PIN D5
+const int sampleDelay = 10;
 
-// VARIABLES GLOBALES PARA ENVÍO / DEBUG
+// VARIABLES GLOBALES
 float uvIndex_global = 0;
 int heading_global = 0;
 String direction_global = "";
@@ -14446,20 +14447,14 @@ float acceleration_global = 0;
 float distancia_global = 0;
 
 // ===============================================
-// 🎧 Reproductor genérico con suavizado (mejor sonido)
+// 🎧 Reproductor genérico con suavizado
 // ===============================================
 void playAudio(const unsigned char *audioArray, unsigned long audioLength) {
-
-  uint8_t last = 128;  // valor previo para suavizar PWM
-
-  for (unsigned long i = 0; i < audioLength; i += 2.7) {  // velocidad x2
-
+  uint8_t last = 128;
+  for (unsigned long i = 0; i < audioLength; i += 2.7) {
     uint8_t sample = pgm_read_byte(&audioArray[i]);
-
-    // ⭐ Filtro suavizador → MENOS RUIDO
     uint8_t smooth = (last + sample) >> 1;
     last = smooth;
-
     analogWrite(AUDIO_PIN, smooth);
     delayMicroseconds(sampleDelay);
   }
@@ -14494,19 +14489,10 @@ void connectMQTT() {
 // MELODÍAS
 // ----------------------------
 void melodyCompass(String dir) {
-  if (dir == "Norte") {
-    playAudio(rawData4, rawData4_length);
-    delay(400);
-  } else if (dir == "Este") {
-    playAudio(rawData1, rawData1_length);
-    delay(200);
-  } else if (dir == "Sur") {
-    playAudio(rawData3, rawData3_length);
-    delay(200);
-  } else if (dir == "Oeste") {
-    playAudio(rawData2, rawData2_length);
-    delay(200);
-  }
+  if (dir == "Norte")      { playAudio(rawData4, rawData4_length); delay(400); }
+  else if (dir == "Este")  { playAudio(rawData1, rawData1_length); delay(200); }
+  else if (dir == "Sur")   { playAudio(rawData3, rawData3_length); delay(200); }
+  else if (dir == "Oeste") { playAudio(rawData2, rawData2_length); delay(200); }
 }
 
 void melodyUV() {
@@ -14549,11 +14535,10 @@ void setup() {
   Serial.begin(115200);
   pinMode(AUDIO_PIN, OUTPUT);
 
-  analogWriteFreq(20000);  // PWM 20 kHz elimina "whine"
-  analogWriteRange(255);   // 8-bit
+  analogWriteFreq(20000);
+  analogWriteRange(255);
 
   delay(1000);
-
   Wire.begin(D1, D2);
 
   pinMode(BUZZER_PIN, OUTPUT);
@@ -14579,11 +14564,18 @@ void setup() {
   offsetX=(maxX+minX)/2.0;
   offsetY=(maxY+minY)/2.0;
 
-  // ---- MPU ----
-  if (!mpu.begin()) while (1);
-  mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
-  mpu.setGyroRange(MPU6050_RANGE_500_DEG);
-  mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  // ---- MPU6050 con FALLBACK ----
+  Serial.println("Inicializando MPU6050...");
+  if (mpu.begin()) {
+    mpuOk = true;
+    Serial.println("✔ MPU6050 OK");
+    mpu.setAccelerometerRange(MPU6050_RANGE_8_G);
+    mpu.setGyroRange(MPU6050_RANGE_500_DEG);
+    mpu.setFilterBandwidth(MPU6050_BAND_21_HZ);
+  } else {
+    Serial.println("❌ MPU6050 NO DETECTADO → MODO SEGURO");
+    mpuOk = false;
+  }
 }
 
 // ----------------------------
@@ -14602,7 +14594,6 @@ void loop() {
   float realVoltage = voltage * 3.3;
   uvIndex_global = realVoltage * 10.0;
 
-  // (umbral lo tenías en 2 para pruebas)
   if (uvIndex_global > 2) {
     if (!uvTimerRunning) {
       uvTimerRunning = true;
@@ -14610,7 +14601,7 @@ void loop() {
     }
     if (currentMillis - uvStartHigh >= uvThresholdTime) {
       melodyUV();
-      feedUVAlert.publish(1);  // envío inmediato cuando se cumple el minuto
+      feedUVAlert.publish(1);
     }
   } else {
     uvTimerRunning = false;
@@ -14639,24 +14630,28 @@ void loop() {
     lastCompassBeep = currentMillis;
   }
 
-  // ========== CAÍDA ==========
-  sensors_event_t a, g, temp;
-  mpu.getEvent(&a, &g, &temp);
+  // ========== CAÍDA — CON FALLBACK ==========
+  if (mpuOk) {
+    sensors_event_t a, g, temp;
+    mpu.getEvent(&a, &g, &temp);
 
-  acceleration_global = sqrt(
-    a.acceleration.x*a.acceleration.x +
-    a.acceleration.y*a.acceleration.y +
-    a.acceleration.z*a.acceleration.z
-  );
+    acceleration_global = sqrt(
+      a.acceleration.x*a.acceleration.x +
+      a.acceleration.y*a.acceleration.y +
+      a.acceleration.z*a.acceleration.z
+    );
 
-  if (acceleration_global < 6.5 && !fallAlertPlayed) {
-    melodyFall();
-    fallAlertPlayed = true;
-    feedFall.publish(1);  // ENVÍO INMEDIATO
+    if (acceleration_global < 6.5 && !fallAlertPlayed) {
+      melodyFall();
+      fallAlertPlayed = true;
+      feedFall.publish(1);
+    }
+    if (acceleration_global > 9.0) fallAlertPlayed = false;
+  } else {
+    acceleration_global = -1; // Identificador de modo seguro
   }
-  if (acceleration_global > 9.0) fallAlertPlayed = false;
 
-  // ========== PROXIMIDAD (ULTRASONIDO) ==========
+  // ========== PROXIMIDAD ==========
   long duracion;
   digitalWrite(TRIG_PIN, LOW);
   delayMicroseconds(2);
@@ -14664,8 +14659,8 @@ void loop() {
   delayMicroseconds(10);
   digitalWrite(TRIG_PIN, LOW);
 
-  duracion = pulseIn(ECHO_PIN, HIGH, 30000); // timeout para evitar cuelgues
-  distancia_global = duracion * 0.0343 / 2.0; // en cm
+  duracion = pulseIn(ECHO_PIN, HIGH, 30000);
+  distancia_global = duracion * 0.0343 / 2.0;
 
   if (distancia_global > 0 && distancia_global <= DISTANCIA_ALERTA) {
     melodyDistance();
@@ -14677,6 +14672,7 @@ void loop() {
 
     String status = "OK";
     if (fallAlertPlayed) status = "Caída detectada";
+    else if (!mpuOk) status = "MPU6050 desconectado";
     else if (uvTimerRunning) status = "UV Alto 60s";
 
     feedUVIndex.publish(uvIndex_global);
@@ -14697,7 +14693,11 @@ void loop() {
     Serial.print("UV: "); Serial.println(uvIndex_global);
     Serial.print("Rumbo: "); Serial.print(heading_global);
     Serial.print("° → "); Serial.println(direction_global);
-    Serial.print("Acel.: "); Serial.println(acceleration_global);
+
+    Serial.print("Acel.: ");
+    if (mpuOk) Serial.println(acceleration_global);
+    else Serial.println("MPU6050 OFF");
+
     Serial.print("Distancia: "); Serial.print(distancia_global);
     Serial.println(" cm");
     Serial.println("===================\n");
